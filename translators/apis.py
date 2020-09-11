@@ -57,6 +57,7 @@ logger.opt(colors=True)
 class Tse:
     def __init__(self):
         self.author = 'Ulion.Tse'
+        self.ss = None
     
     @staticmethod
     def time_stat(func):
@@ -272,6 +273,7 @@ class Baidu(Tse):
         self.api_url = 'https://fanyi.baidu.com/v2transapi'
         self.langdetect_url = 'https://fanyi.baidu.com/langdetect'
         self.get_sign_url = 'https://fanyi-cdn.cdn.bcebos.com/static/translation/pkg/index_bd36cef.js'
+        self.get_sign_url2 = None
         self.get_sign_pattern = 'https://fanyi-cdn.cdn.bcebos.com/static/translation/pkg/index_(.*?).js'
         self.host_headers = self.get_headers(self.host_url, if_use_api=False)
         self.api_headers = self.get_headers(self.host_url, if_use_api=True)
@@ -288,12 +290,12 @@ class Baidu(Tse):
         self.query_count = 0
         self.output_zh = 'zh'
 
-    def get_sign_html(self, ss, host_html, proxies):
+    def get_sign_html(self, ss, proxies):
         try:
             r = ss.get(self.get_sign_url, headers=self.host_headers, proxies=proxies)
             r.raise_for_status()
         except:
-            self.get_sign_url = re.search(self.get_sign_pattern,host_html).group(0)
+            self.get_sign_url = self.get_sign_url2
             r = ss.get(self.get_sign_url, headers=self.host_headers, proxies=proxies)
         return r.text
 
@@ -304,14 +306,13 @@ class Baidu(Tse):
         sign_js = sign_js.replace('function e(r)', 'function e(r,i)')
         return execjs.compile(sign_js).call('e', ts_text, gtk)
 
-    def get_host_info(self, host_html, sign_html, ts_text):
+    def get_host_info(self, host_html, ts_text):
         gtk = re.findall("window.gtk = '(.*?)';", host_html)[0]
-        sign = self.get_sign(sign_html, ts_text, gtk)
     
         et = etree.HTML(host_html)
         js_txt = et.xpath("/html/body/script[2]/text()")[0][20:-3]
         js_data = execjs.get().eval(js_txt)
-        js_data.update({'gtk': gtk, 'sign': sign})
+        js_data.update({'gtk': gtk})
         return js_data
 
     @Tse.time_stat
@@ -336,32 +337,42 @@ class Baidu(Tse):
         # use_cache = kwargs.get('use_cache', False)
         sleep_seconds = kwargs.get('sleep_seconds', 0.05 + random.random()/2 + 1e-100*2**self.query_count)
     
-        with requests.Session() as ss:
-            host_html = ss.get(self.host_url, headers=self.host_headers, proxies=proxies).text
-            sign_html = self.get_sign_html(ss, host_html, proxies)
+        if self.ss is None:
+            self.ss = requests.Session()
 
-            self.host_info = self.get_host_info(host_html, sign_html, query_text)
-            self.new_bdtk = {"baidu_id": ss.cookies.get("BAIDUID"), "token": self.host_info.get("token")}
-            self.language_map = self.host_info['langMap']
-            from_language,to_language = self.check_language(from_language,to_language,self.language_map,output_zh=self.output_zh)
-            self.api_headers.update({"cookie": "BAIDUID={};".format(self.bdtk['baidu_id'])})
+        ss = self.ss
+        if self.host_info is None:
+            host_html = ss.get(self.host_url, headers=self.host_headers, proxies=proxies).text
+            self.host_info = self.get_host_info(host_html, query_text)
+            self.get_sign_url2 = re.search(self.get_sign_pattern,host_html).group(0)
+
+        sign_html = self.get_sign_html(ss, proxies)
+        sign = self.get_sign(sign_html, query_text, self.host_info["gtk"])
+        self.host_info["sign"] = sign
+
+        self.new_bdtk = {"baidu_id": ss.cookies.get("BAIDUID"), "token": self.host_info.get("token")}
+        self.language_map = self.host_info['langMap']
+        from_language,to_language = self.check_language(from_language,to_language,self.language_map,output_zh=self.output_zh)
+        self.api_headers.update({"cookie": "BAIDUID={};".format(self.bdtk['baidu_id'])})
+        if from_language == "auto":
             res = ss.post(self.langdetect_url, headers=self.api_headers, data={"query": query_text}, proxies=proxies)
-            from_language = res.json()['lan'] if from_language == 'auto' else from_language
-            
-            # param_data = {"from": from_language, "to": to_language}
-            form_data = {
-                "from": from_language,
-                "to": to_language,
-                "query": str(query_text),  # from urllib.parse import quote_plus
-                "transtype": "translang",  # ["translang","realtime"]
-                "simple_means_flag": "3",
-                "sign": self.host_info.get('sign'),
-                "token": self.bdtk['token'],  # self.host_info.get('token'),
-                "domain": use_domain,
-            }
-            r = ss.post(self.api_url, headers=self.api_headers, data=urlencode(form_data).encode('utf-8'),proxies=proxies)
-            r.raise_for_status()
-            data = r.json()
+            from_language = res.json()['lan']
+        
+        # param_data = {"from": from_language, "to": to_language}
+        form_data = {
+            "from": from_language,
+            "to": to_language,
+            "query": str(query_text),  # from urllib.parse import quote_plus
+            "transtype": "translang",  # ["translang","realtime"]
+            "simple_means_flag": "3",
+            "sign": self.host_info.get('sign'),
+            "token": self.bdtk['token'],  # self.host_info.get('token'),
+            "domain": use_domain,
+        }
+        r = ss.post(self.api_url, headers=self.api_headers, data=urlencode(form_data).encode('utf-8'),proxies=proxies)
+        r.raise_for_status()
+        data = r.json()
+
         time.sleep(sleep_seconds)
         self.query_count += 1
         simple_data = data['trans_result']['data'][0]['dst'] if data.get('trans_result') else {'errno': data.get('errno')}
